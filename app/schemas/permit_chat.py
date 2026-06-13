@@ -73,9 +73,24 @@ class PermitChatRequest(BaseModel):
     )
 
 
+class DocumentChange(BaseModel):
+    """문서 생성 이후 채팅으로 감지된 서류 값 변경 1건."""
+
+    questionId: int = Field(description="변경된 질문 id")
+    layoutKey: str | None = Field(default=None, description="질문 레이아웃 키")
+    name: str | None = Field(default=None, description="질문명")
+    previous: str | None = Field(default=None, description="이전 값(없었으면 null)")
+    current: str | None = Field(default=None, description="새 값")
+    source: str = Field(default="conversation", description="값 출처: conversation/land_info/generated")
+
+
 class PermitChatResponse(BaseModel):
     """인허가 대화 한 턴 응답."""
 
     thread_id: str = Field(description="이 대화의 세션 식별자(다음 턴에 재사용)")
     reply: str = Field(description="에이전트 응답 텍스트")
     permit_type: str | None = Field(default=None, description="현재 세션에서 확정된 인허가 유형 코드")
+    changes: list[DocumentChange] = Field(
+        default_factory=list,
+        description="문서 생성 후 이 턴에 감지된 서류 값 변경분(베이스라인 없으면 빈 목록)",
+    )

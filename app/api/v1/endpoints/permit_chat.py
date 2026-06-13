@@ -4,6 +4,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request
 
 from app.agents.permit_agent import run_permit_chat
+from app.agents.permit_document import detect_document_changes
 from app.schemas.permit_chat import PermitChatRequest, PermitChatResponse
 
 router = APIRouter()
@@ -23,4 +24,8 @@ async def permit_chat(body: PermitChatRequest, request: Request) -> PermitChatRe
     thread_id = body.thread_id or str(uuid.uuid4())
     land_context = body.land_context.model_dump() if body.land_context else None
     reply, permit_type = await run_permit_chat(agent, body.message, thread_id, land_context)
-    return PermitChatResponse(thread_id=thread_id, reply=reply, permit_type=permit_type)
+    # 문서를 생성한 적 있는 세션이면, 이 턴 발화로 바뀐 서류 값을 감지해 함께 반환한다.
+    changes = await detect_document_changes(agent, thread_id)
+    return PermitChatResponse(
+        thread_id=thread_id, reply=reply, permit_type=permit_type, changes=changes
+    )

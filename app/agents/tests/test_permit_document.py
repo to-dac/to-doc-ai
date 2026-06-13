@@ -10,6 +10,9 @@ from app.agents.permit_document import (
     _coerce_answer,
     _conversation_transcript,
     _ExtractionResult,
+    _looks_like_form_data,
+    _save_snapshot,
+    detect_document_changes,
     fill_permit_document,
 )
 from app.schemas.permit_document import (
@@ -17,6 +20,35 @@ from app.schemas.permit_document import (
     PermitDocumentRequest,
     Question,
 )
+
+
+def _change_template() -> DocumentTemplate:
+    return DocumentTemplate(
+        templateCode="tc",
+        sections=[
+            {
+                "id": 1,
+                "questions": [
+                    {"id": 1, "layoutKey": "applicantName", "name": "성명"},
+                    {"id": 2, "layoutKey": "occupancyArea", "questionType": "NUMBER", "name": "면적"},
+                ],
+            }
+        ],
+    )
+
+
+def _human(content: str):
+    return SimpleNamespace(type="human", content=content)
+
+
+class _MsgAgent:
+    """aget_state 로 고정 메시지를 돌려주는 가짜 에이전트."""
+
+    def __init__(self, messages: list) -> None:
+        self._messages = messages
+
+    async def aget_state(self, config):
+        return SimpleNamespace(values={"messages": self._messages})
 
 
 def _radio_q() -> Question:
@@ -149,6 +181,80 @@ def test_request_requires_template_or_permit_type():
     """template·permit_type 둘 다 없으면 검증 단계에서 거부된다."""
     with pytest.raises(ValueError):
         PermitDocumentRequest(land_info={"pnu": "1"})
+
+
+def test_looks_like_form_data_filter():
+    t = _change_template()
+    assert _looks_like_form_data("면적은 500이야", t) is True  # 숫자
+    assert _looks_like_form_data("성명 바꿔줘", t) is True  # 힌트 키워드
+    assert _looks_like_form_data("그냥 고마워요", t) is False  # 신호 없음
+
+
+@pytest.mark.asyncio
+async def test_detect_no_baseline_returns_empty():
+    """문서를 생성한 적 없으면(스냅샷 없음) 감지하지 않는다."""
+    assert await detect_document_changes(object(), "no-baseline-thread") == []
+
+
+@pytest.mark.asyncio
+async def test_detect_skips_llm_when_filter_blocks(monkeypatch):
+    """1차 필터에서 막힌 발화는 LLM 재추출 없이 빈 변경분을 낸다."""
+    _save_snapshot("th-filter", _change_template(), {}, {1: None, 2: None})
+    called = {"n": 0}
+
+    async def fake_extract(*args, **kwargs):
+        called["n"] += 1
+        return _ExtractionResult(answers=[])
+
+    monkeypatch.setattr(permit_document, "_extract_answers", fake_extract)
+    changes = await detect_document_changes(_MsgAgent([_human("고마워요")]), "th-filter")
+
+    assert changes == []
+    assert called["n"] == 0  # 필터 차단 → LLM 미호출
+
+
+@pytest.mark.asyncio
+async def test_detect_reports_changes_and_advances_baseline(monkeypatch):
+    """필터 통과 발화는 재추출 후 스냅샷과 diff 해 변경분을 내고 베이스라인을 갱신한다."""
+    _save_snapshot("th-detect", _change_template(), {}, {1: "홍길동", 2: None})
+
+    async def fake_extract(land_info, transcript, questions):
+        return _ExtractionResult(
+            answers=[
+                _AnswerItem(question_id=1, value="김철수", source="conversation"),
+                _AnswerItem(question_id=2, value="500", source="conversation"),
+            ]
+        )
+
+    monkeypatch.setattr(permit_document, "_extract_answers", fake_extract)
+    agent = _MsgAgent([_human("이름은 김철수, 면적 500")])
+
+    changes = await detect_document_changes(agent, "th-detect")
+    by_key = {c.layoutKey: c for c in changes}
+    assert by_key["applicantName"].previous == "홍길동"
+    assert by_key["applicantName"].current == "김철수"
+    assert by_key["occupancyArea"].previous is None
+    assert by_key["occupancyArea"].current == "500"
+
+    # 같은 추출이 또 와도 직전 대비 변경분이 없으므로 빈 목록.
+    assert await detect_document_changes(agent, "th-detect") == []
+
+
+@pytest.mark.asyncio
+async def test_fill_saves_baseline_snapshot(monkeypatch):
+    """thread_id 가 있으면 문서 생성 결과를 베이스라인 스냅샷으로 저장한다."""
+
+    async def fake_extract(land_info, transcript, questions, **_):
+        return _ExtractionResult(answers=[])
+
+    monkeypatch.setattr(permit_document, "_extract_answers", fake_extract)
+    body = PermitDocumentRequest(
+        thread_id="th-snap", land_info={"pnu": "1"}, permit_type="mountain"
+    )
+    await fill_permit_document(None, body)
+
+    assert "th-snap" in permit_document._SNAPSHOTS
+    assert permit_document._SNAPSHOTS["th-snap"].template.templateCode == "mountain_permit"
 
 
 @pytest.mark.asyncio

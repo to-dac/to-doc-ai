@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
 from app.agents.llm import build_model
 from app.agents.permit_template import load_template
+from app.schemas.permit_chat import DocumentChange
 from app.schemas.permit_document import (
     DocumentTemplate,
     FilledQuestion,
@@ -56,17 +58,32 @@ def _conversation_transcript(messages: list) -> str:
     return "\n".join(lines)
 
 
-async def _collect_conversation(agent, thread_id: str | None) -> str:
-    """thread_id 세션의 대화 이력을 조회한다(읽기 전용). 실패/부재 시 빈 문자열."""
+async def _load_messages(agent, thread_id: str | None) -> list:
+    """thread_id 세션의 메시지 목록을 조회한다(읽기 전용). 실패/부재 시 빈 리스트."""
     if agent is None or not thread_id:
-        return ""
+        return []
     try:
         snapshot = await agent.aget_state({"configurable": {"thread_id": thread_id}})
     except Exception:
         logger.warning("세션 상태 조회 실패 — 대화 보강 없이 진행 (thread_id=%s)", thread_id)
-        return ""
+        return []
     values = getattr(snapshot, "values", None) or {}
-    return _conversation_transcript(values.get("messages", []))
+    return values.get("messages", []) or []
+
+
+async def _collect_conversation(agent, thread_id: str | None) -> str:
+    """thread_id 세션의 대화 이력을 사람이 읽을 텍스트로 조회한다."""
+    return _conversation_transcript(await _load_messages(agent, thread_id))
+
+
+def _latest_user_message(messages: list) -> str:
+    """메시지 목록에서 가장 최근 사용자(human) 발화 텍스트를 반환한다."""
+    for msg in reversed(messages or []):
+        if getattr(msg, "type", None) == "human":
+            content = getattr(msg, "content", None)
+            if isinstance(content, str) and content:
+                return content
+    return ""
 
 
 def _resolve_template(body: PermitDocumentRequest) -> DocumentTemplate:
@@ -187,6 +204,7 @@ async def fill_permit_document(agent, body: PermitDocumentRequest) -> PermitDocu
     by_id = {a.question_id: a for a in extraction.answers}
 
     filled_count = 0
+    snapshot_answers: dict[int, str | None] = {}
     filled_sections: list[FilledSection] = []
     for section in template.sections:
         filled_questions: list[FilledQuestion] = []
@@ -197,6 +215,7 @@ async def fill_permit_document(agent, body: PermitDocumentRequest) -> PermitDocu
             )
             if answer is not None:
                 filled_count += 1
+            snapshot_answers[q.id] = answer
             filled_questions.append(
                 FilledQuestion(**q.model_dump(), answer=answer, source=source)
             )
@@ -210,6 +229,10 @@ async def fill_permit_document(agent, body: PermitDocumentRequest) -> PermitDocu
             )
         )
 
+    # 베이스라인 스냅샷 저장 — 이후 채팅 턴에서 이 시점 대비 변경분을 감지한다.
+    if body.thread_id:
+        _save_snapshot(body.thread_id, template, land_info, snapshot_answers)
+
     return PermitDocumentResponse(
         thread_id=body.thread_id,
         templateCode=template.templateCode,
@@ -217,3 +240,91 @@ async def fill_permit_document(agent, body: PermitDocumentRequest) -> PermitDocu
         filled_count=filled_count,
         total_count=len(questions),
     )
+
+
+@dataclass
+class _DocumentSnapshot:
+    """문서 생성 시점의 베이스라인. 이후 채팅 변경분 감지의 기준값."""
+
+    template: DocumentTemplate
+    land_info: dict
+    answers: dict[int, str | None]
+
+
+# thread_id → 마지막 생성 문서 스냅샷. InMemorySaver 와 동일하게 인메모리·단일 프로세스 전제.
+_SNAPSHOTS: dict[str, _DocumentSnapshot] = {}
+
+# 1차 필터: 사용자 발화가 서류 값 같은 신호를 담았는지 싸게 판별할 키워드.
+_FORM_HINT_KEYWORDS = (
+    "이름", "성명", "주소", "전화", "번호", "면적", "목적", "기간", "날짜", "일자",
+    "구분", "종류", "방법", "위치", "지번", "소재지", "상호", "사업자", "대표", "법인",
+)
+
+
+def _save_snapshot(
+    thread_id: str, template: DocumentTemplate, land_info: dict, answers: dict[int, str | None]
+) -> None:
+    """문서 생성 결과를 베이스라인으로 보관한다."""
+    _SNAPSHOTS[thread_id] = _DocumentSnapshot(
+        template=template, land_info=land_info, answers=dict(answers)
+    )
+
+
+def _looks_like_form_data(message: str, template: DocumentTemplate) -> bool:
+    """발화가 서류 값을 담았을 가능성을 싸게(LLM 없이) 판별한다.
+
+    숫자가 있거나, 힌트 키워드 또는 양식 질문명 토큰과 겹치면 통과시킨다.
+    """
+    if not message:
+        return False
+    if any(ch.isdigit() for ch in message):
+        return True
+    if any(kw in message for kw in _FORM_HINT_KEYWORDS):
+        return True
+    for q in _iter_questions(template):
+        if not q.name:
+            continue
+        for token in q.name.replace("(", " ").replace(")", " ").split():
+            if len(token) >= 2 and token in message:
+                return True
+    return False
+
+
+async def detect_document_changes(agent, thread_id: str | None) -> list[DocumentChange]:
+    """문서 생성 이후 채팅으로 바뀐 서류 값을 감지해 변경분 목록을 반환한다.
+
+    - 베이스라인(생성 스냅샷)이 없으면 빈 목록(감지 비활성).
+    - 1차 필터를 통과한 발화에 한해 재추출(LLM)해 스냅샷과 diff 한다.
+    - 감지된 값은 스냅샷에 반영해 다음 턴은 직전 대비 변경분만 내보낸다.
+    """
+    snap = _SNAPSHOTS.get(thread_id) if thread_id else None
+    if snap is None:
+        return []
+
+    messages = await _load_messages(agent, thread_id)
+    if not _looks_like_form_data(_latest_user_message(messages), snap.template):
+        return []
+
+    transcript = _conversation_transcript(messages)
+    questions = _iter_questions(snap.template)
+    extraction = await _extract_answers(snap.land_info, transcript, questions)
+    by_id = {a.question_id: a for a in extraction.answers}
+
+    changes: list[DocumentChange] = []
+    for q in questions:
+        item = by_id.get(q.id)
+        new_val, source = _coerce_answer(q, item.value, item.source) if item else (None, "unknown")
+        if new_val is None or new_val == snap.answers.get(q.id):
+            continue
+        changes.append(
+            DocumentChange(
+                questionId=q.id,
+                layoutKey=q.layoutKey,
+                name=q.name,
+                previous=snap.answers.get(q.id),
+                current=new_val,
+                source=source,
+            )
+        )
+        snap.answers[q.id] = new_val
+    return changes
