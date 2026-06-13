@@ -56,22 +56,20 @@ def test_coerce_answer_none_value_is_unknown():
 
 
 def test_coerce_answer_keeps_generated_source():
-    """generate_missing 모드의 임의 생성 값은 source='generated' 로 유지된다."""
+    """임의 생성된 값은 source='generated' 로 유지된다(옵션·검증 위반만 강등)."""
     answer, source = _coerce_answer(Question(id=1, questionType="TEXT"), "임의값", "generated")
     assert answer == "임의값"
     assert source == "generated"
 
 
-def test_extraction_prompt_strict_vs_generate():
-    """generate_missing 플래그가 프롬프트 규칙을 전환한다."""
-    qs = [Question(id=1, name="성명")]
-    strict = _build_extraction_prompt({}, "", qs)
-    generate = _build_extraction_prompt({}, "", qs, generate_missing=True)
+def test_extraction_prompt_always_fills_with_generation():
+    """프롬프트는 항상 모든 질문을 채우고, 근거 없으면 임의 생성하도록 유도한다."""
+    prompt = _build_extraction_prompt({}, "", [Question(id=1, name="성명")])
 
-    assert "추측 금지" in strict
-    assert "generated" not in strict
-    assert "임의로 생성" in generate
-    assert 'source="generated"' in generate
+    assert "null 을 두지 마라" in prompt
+    assert "임의로 생성" in prompt
+    assert 'source="generated"' in prompt
+    assert "추측 금지" not in prompt
 
 
 def test_conversation_transcript_keeps_human_and_ai():

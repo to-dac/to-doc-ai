@@ -20,7 +20,7 @@ from app.schemas.permit_document import (
 logger = logging.getLogger(__name__)
 
 # 추출 모델이 반환할 고정 스키마. 템플릿이 동적이라 question_id 로 매핑한다.
-# generated: 근거 없이 모델이 임의로 생성한 값(generate_missing 모드).
+# generated: 근거 없이 모델이 그럴듯하게 생성한 값. unknown: 끝내 못 채운 값.
 _VALID_SOURCES = {"land_info", "conversation", "unknown", "generated"}
 
 
@@ -84,15 +84,8 @@ def _iter_questions(template: DocumentTemplate) -> list[Question]:
     return [q for section in template.sections for q in section.questions]
 
 
-_RULES_STRICT = """[규칙]
-- 각 질문 id 에 대해 value 를 채운다. 근거가 없으면 value=null.
-- 선택지(options)가 있으면 반드시 그 중 하나만 고른다(JSON 배열). 애매하면 null.
-- 추측 금지. 필지/대화에 근거가 있을 때만 채운다.
-- source 는 값의 출처: 필지에서 왔으면 "land_info", 대화에서 왔으면 "conversation", 못 채웠으면 "unknown".
-- 모든 질문에 대해 한 개씩 answers 항목을 반환한다."""
-
-_RULES_GENERATE = """[규칙]
-- 각 질문 id 에 대해 value 를 가능한 한 채운다(되도록 null 을 두지 마라).
+_FILL_RULES = """[규칙]
+- 모든 질문을 빠짐없이 채운다. value=null 을 두지 마라(항상 값을 생성한다).
 - 필지 정보에 근거가 있으면 그 값으로 채우고 source="land_info".
 - 대화 이력에 근거가 있으면 그 값으로 채우고 source="conversation".
 - 둘 다 근거가 없으면, 질문명·유형·설명에 어울리는 그럴듯한 예시 값을 임의로 생성해 채우고 source="generated".
@@ -103,15 +96,11 @@ _RULES_GENERATE = """[규칙]
 
 
 def _build_extraction_prompt(
-    land_info: dict,
-    transcript: str,
-    questions: list[Question],
-    *,
-    generate_missing: bool = False,
+    land_info: dict, transcript: str, questions: list[Question]
 ) -> str:
     """추출 모델에 줄 프롬프트를 만든다.
 
-    generate_missing=True 면 근거 없는 질문도 그럴듯한 임의 값으로 생성하도록 유도한다.
+    근거가 있으면 그 값으로, 없으면 그럴듯한 임의 값을 생성해 모든 질문을 채우도록 유도한다.
     """
     q_lines = []
     for q in questions:
@@ -127,7 +116,6 @@ def _build_extraction_prompt(
         q_lines.append(" | ".join(parts))
 
     conversation_block = transcript or "(대화 이력 없음)"
-    rules = _RULES_GENERATE if generate_missing else _RULES_STRICT
     return f"""너는 인허가 신청서 자동작성 도우미다. 아래 근거로 각 질문의 답을 채워라.
 
 [필지 정보(JSON)]
@@ -139,15 +127,11 @@ def _build_extraction_prompt(
 [채울 질문 목록]
 {chr(10).join(q_lines)}
 
-{rules}"""
+{_FILL_RULES}"""
 
 
 async def _extract_answers(
-    land_info: dict,
-    transcript: str,
-    questions: list[Question],
-    *,
-    generate_missing: bool = False,
+    land_info: dict, transcript: str, questions: list[Question]
 ) -> _ExtractionResult:
     """LLM 경계 — 구조화 출력으로 질문별 답을 추출한다.
 
@@ -155,9 +139,7 @@ async def _extract_answers(
     """
     model = build_model()
     structured = model.with_structured_output(_ExtractionResult)
-    prompt = _build_extraction_prompt(
-        land_info, transcript, questions, generate_missing=generate_missing
-    )
+    prompt = _build_extraction_prompt(land_info, transcript, questions)
     return await structured.ainvoke(prompt)
 
 
@@ -201,9 +183,7 @@ async def fill_permit_document(agent, body: PermitDocumentRequest) -> PermitDocu
     land_info = body.land_info.model_dump()
     questions = _iter_questions(template)
 
-    extraction = await _extract_answers(
-        land_info, transcript, questions, generate_missing=body.generate_missing
-    )
+    extraction = await _extract_answers(land_info, transcript, questions)
     by_id = {a.question_id: a for a in extraction.answers}
 
     filled_count = 0

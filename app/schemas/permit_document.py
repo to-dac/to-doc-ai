@@ -100,10 +100,6 @@ class PermitDocumentRequest(BaseModel):
     permit_type: str | None = Field(
         default=None, description="양식 자동 로드용 인허가 유형 코드(building/mountain/…)"
     )
-    generate_missing: bool = Field(
-        default=False,
-        description="근거 없는 항목을 모델이 임의 값으로 생성할지(데모·미리보기용). 기본 False",
-    )
 
     @model_validator(mode="after")
     def _require_template_or_type(self) -> "PermitDocumentRequest":
