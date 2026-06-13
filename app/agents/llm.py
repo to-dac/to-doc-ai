@@ -7,8 +7,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 
-# 이 패키지 폴더의 .env 에서 환경변수를 로드한다(main.py 와 동일 계약).
-load_dotenv(Path(__file__).resolve().with_name(".env"))
+# 프로젝트 루트의 .env 에서 환경변수를 로드한다.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 MODEL_NAME = "claude-sonnet-4-6"
 

@@ -1,9 +1,15 @@
 from typing import List
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore",
+    )
+
     APP_NAME: str = "to-dac-backend"
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = False
@@ -11,10 +17,6 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["http://localhost:3000"]
 
     ANTHROPIC_API_KEY: str = ""
-
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
 
 
 settings = Settings()

@@ -8,8 +8,8 @@ from deepagents import create_deep_agent
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 
-# 이 파일과 같은 폴더의 .env에서 환경변수를 로드한다.
-load_dotenv(Path(__file__).resolve().with_name(".env"))
+# 프로젝트 루트의 .env에서 환경변수를 로드한다.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
