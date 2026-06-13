@@ -7,7 +7,9 @@ import logging
 from pydantic import BaseModel, Field
 
 from app.agents.llm import build_model
+from app.agents.permit_template import load_template
 from app.schemas.permit_document import (
+    DocumentTemplate,
     FilledQuestion,
     FilledSection,
     PermitDocumentRequest,
@@ -18,7 +20,8 @@ from app.schemas.permit_document import (
 logger = logging.getLogger(__name__)
 
 # 추출 모델이 반환할 고정 스키마. 템플릿이 동적이라 question_id 로 매핑한다.
-_VALID_SOURCES = {"land_info", "conversation", "unknown"}
+# generated: 근거 없이 모델이 임의로 생성한 값(generate_missing 모드).
+_VALID_SOURCES = {"land_info", "conversation", "unknown", "generated"}
 
 
 class _AnswerItem(BaseModel):
@@ -66,13 +69,50 @@ async def _collect_conversation(agent, thread_id: str | None) -> str:
     return _conversation_transcript(values.get("messages", []))
 
 
-def _iter_questions(template) -> list[Question]:
+def _resolve_template(body: PermitDocumentRequest) -> DocumentTemplate:
+    """요청에서 채울 양식을 확정한다. template 직접 지정이 우선, 없으면 permit_type 로 로드."""
+    if body.template is not None:
+        return body.template
+    template = load_template(body.permit_type) if body.permit_type else None
+    if template is None:
+        raise ValueError(f"양식을 찾을 수 없습니다: permit_type={body.permit_type!r}")
+    return template
+
+
+def _iter_questions(template: DocumentTemplate) -> list[Question]:
     """템플릿의 모든 섹션 질문을 평탄화한다."""
     return [q for section in template.sections for q in section.questions]
 
 
-def _build_extraction_prompt(land_info: dict, transcript: str, questions: list[Question]) -> str:
-    """추출 모델에 줄 프롬프트를 만든다."""
+_RULES_STRICT = """[규칙]
+- 각 질문 id 에 대해 value 를 채운다. 근거가 없으면 value=null.
+- 선택지(options)가 있으면 반드시 그 중 하나만 고른다(JSON 배열). 애매하면 null.
+- 추측 금지. 필지/대화에 근거가 있을 때만 채운다.
+- source 는 값의 출처: 필지에서 왔으면 "land_info", 대화에서 왔으면 "conversation", 못 채웠으면 "unknown".
+- 모든 질문에 대해 한 개씩 answers 항목을 반환한다."""
+
+_RULES_GENERATE = """[규칙]
+- 각 질문 id 에 대해 value 를 가능한 한 채운다(되도록 null 을 두지 마라).
+- 필지 정보에 근거가 있으면 그 값으로 채우고 source="land_info".
+- 대화 이력에 근거가 있으면 그 값으로 채우고 source="conversation".
+- 둘 다 근거가 없으면, 질문명·유형·설명에 어울리는 그럴듯한 예시 값을 임의로 생성해 채우고 source="generated".
+- 선택지(options)가 있으면 생성할 때도 반드시 그 중 하나만 고른다.
+- 검증(validation: maxLength/min 등)이 있으면 생성 값도 그 제약을 지킨다.
+- 날짜는 YYYY-MM-DD, 숫자는 숫자만, 개인정보(주민등록번호 등)는 형식만 맞춘 가짜 값으로 생성한다.
+- 모든 질문에 대해 한 개씩 answers 항목을 반환한다."""
+
+
+def _build_extraction_prompt(
+    land_info: dict,
+    transcript: str,
+    questions: list[Question],
+    *,
+    generate_missing: bool = False,
+) -> str:
+    """추출 모델에 줄 프롬프트를 만든다.
+
+    generate_missing=True 면 근거 없는 질문도 그럴듯한 임의 값으로 생성하도록 유도한다.
+    """
     q_lines = []
     for q in questions:
         parts = [f"- id={q.id}", f"name={q.name!r}"]
@@ -87,6 +127,7 @@ def _build_extraction_prompt(land_info: dict, transcript: str, questions: list[Q
         q_lines.append(" | ".join(parts))
 
     conversation_block = transcript or "(대화 이력 없음)"
+    rules = _RULES_GENERATE if generate_missing else _RULES_STRICT
     return f"""너는 인허가 신청서 자동작성 도우미다. 아래 근거로 각 질문의 답을 채워라.
 
 [필지 정보(JSON)]
@@ -98,16 +139,15 @@ def _build_extraction_prompt(land_info: dict, transcript: str, questions: list[Q
 [채울 질문 목록]
 {chr(10).join(q_lines)}
 
-[규칙]
-- 각 질문 id 에 대해 value 를 채운다. 근거가 없으면 value=null.
-- 선택지(options)가 있으면 반드시 그 중 하나만 고른다(JSON 배열). 애매하면 null.
-- 추측 금지. 필지/대화에 근거가 있을 때만 채운다.
-- source 는 값의 출처: 필지에서 왔으면 "land_info", 대화에서 왔으면 "conversation", 못 채웠으면 "unknown".
-- 모든 질문에 대해 한 개씩 answers 항목을 반환한다."""
+{rules}"""
 
 
 async def _extract_answers(
-    land_info: dict, transcript: str, questions: list[Question]
+    land_info: dict,
+    transcript: str,
+    questions: list[Question],
+    *,
+    generate_missing: bool = False,
 ) -> _ExtractionResult:
     """LLM 경계 — 구조화 출력으로 질문별 답을 추출한다.
 
@@ -115,7 +155,9 @@ async def _extract_answers(
     """
     model = build_model()
     structured = model.with_structured_output(_ExtractionResult)
-    prompt = _build_extraction_prompt(land_info, transcript, questions)
+    prompt = _build_extraction_prompt(
+        land_info, transcript, questions, generate_missing=generate_missing
+    )
     return await structured.ainvoke(prompt)
 
 
@@ -154,16 +196,19 @@ async def fill_permit_document(agent, body: PermitDocumentRequest) -> PermitDocu
     - agent 는 세션 대화 이력 조회(읽기)에만 쓰인다. None 이면 필지만으로 채운다.
     - 실제 채우기는 별도 모델 호출(_extract_answers)로 수행한다(채팅 스레드 미오염).
     """
+    template = _resolve_template(body)
     transcript = await _collect_conversation(agent, body.thread_id)
     land_info = body.land_info.model_dump()
-    questions = _iter_questions(body.template)
+    questions = _iter_questions(template)
 
-    extraction = await _extract_answers(land_info, transcript, questions)
+    extraction = await _extract_answers(
+        land_info, transcript, questions, generate_missing=body.generate_missing
+    )
     by_id = {a.question_id: a for a in extraction.answers}
 
     filled_count = 0
     filled_sections: list[FilledSection] = []
-    for section in body.template.sections:
+    for section in template.sections:
         filled_questions: list[FilledQuestion] = []
         for q in section.questions:
             item = by_id.get(q.id)
@@ -187,7 +232,7 @@ async def fill_permit_document(agent, body: PermitDocumentRequest) -> PermitDocu
 
     return PermitDocumentResponse(
         thread_id=body.thread_id,
-        templateCode=body.template.templateCode,
+        templateCode=template.templateCode,
         sections=filled_sections,
         filled_count=filled_count,
         total_count=len(questions),

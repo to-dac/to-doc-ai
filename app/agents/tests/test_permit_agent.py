@@ -10,6 +10,7 @@ from app.agents.permits import (
     DOCS_DIR,
     DOCS_MOUNT,
     PERMITS,
+    PROCEDURE_DIR,
     build_docs_index,
     format_land_context,
     get_permit,
@@ -21,14 +22,15 @@ from app.agents.tools import set_permit_type
 def test_all_permits_map_to_existing_files() -> None:
     """등록된 6개 유형이 모두 docs/ 실제 파일과 1:1로 매칭된다."""
     assert len(PERMITS) == 6
-    missing = [p.filename for p in PERMITS if not (DOCS_DIR / p.filename).exists()]
+    missing = [p.rel_path for p in PERMITS if not (DOCS_DIR / p.rel_path).exists()]
     assert missing == []
 
 
 def test_doc_path_uses_mount_prefix() -> None:
     farm = get_permit("farmland")
     assert farm is not None
-    assert farm.doc_path == f"{DOCS_MOUNT}/{farm.filename}"
+    assert farm.doc_path == f"{DOCS_MOUNT}/{farm.rel_path}"
+    assert farm.rel_path.startswith(f"{PROCEDURE_DIR}/")
 
 
 def test_docs_index_lists_all_codes() -> None:
@@ -69,7 +71,7 @@ def test_backend_exposes_six_docs() -> None:
         default=StateBackend(),
         routes={f"{DOCS_MOUNT}/": FilesystemBackend(root_dir=DOCS_DIR, virtual_mode=True)},
     )
-    entries = backend.ls(f"{DOCS_MOUNT}/").entries
+    entries = backend.ls(f"{DOCS_MOUNT}/{PROCEDURE_DIR}/").entries
     md_files = [e for e in entries if not e["is_dir"] and e["path"].endswith(".md")]
     assert len(md_files) == 6
 

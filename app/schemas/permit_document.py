@@ -1,7 +1,7 @@
 # 인허가 문서 자동작성 요청/응답 스키마 — 필지·세션 기반으로 양식 질문을 채운다
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.permit_chat import LandContext
 
@@ -89,13 +89,27 @@ class FilledSection(BaseModel):
 class PermitDocumentRequest(BaseModel):
     """문서 자동작성 요청.
 
-    land_info(필지 데이터)와 template(양식)을 기본 근거로, thread_id 가 있으면
-    해당 세션 대화 이력을 보조 근거로 삼아 각 질문을 채운다.
+    land_info(필지 데이터)를 기본 근거로, thread_id 가 있으면 해당 세션 대화
+    이력을 보조 근거로 삼아 각 질문을 채운다. 양식은 template 으로 직접 주거나,
+    permit_type 만 주면 서버의 서류 정보 문서에서 자동 로드한다(둘 중 하나는 필수).
     """
 
     thread_id: str | None = Field(default=None, description="대화 이력 보강용 세션 식별자")
     land_info: LandInfo = Field(description="필지 데이터(채우기 1차 근거)")
-    template: DocumentTemplate = Field(description="채울 양식")
+    template: DocumentTemplate | None = Field(default=None, description="채울 양식(직접 지정 시)")
+    permit_type: str | None = Field(
+        default=None, description="양식 자동 로드용 인허가 유형 코드(building/mountain/…)"
+    )
+    generate_missing: bool = Field(
+        default=False,
+        description="근거 없는 항목을 모델이 임의 값으로 생성할지(데모·미리보기용). 기본 False",
+    )
+
+    @model_validator(mode="after")
+    def _require_template_or_type(self) -> "PermitDocumentRequest":
+        if self.template is None and self.permit_type is None:
+            raise ValueError("template 또는 permit_type 중 하나는 반드시 지정해야 합니다.")
+        return self
 
 
 class PermitDocumentResponse(BaseModel):

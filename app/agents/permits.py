@@ -10,6 +10,10 @@ DOCS_MOUNT = "/docs"
 # 실제 마크다운이 위치한 디렉토리 (FilesystemBackend root_dir).
 DOCS_DIR = Path(__file__).resolve().with_name("docs")
 
+# docs/ 하위 카테고리 폴더. 처리 절차·체크리스트는 절차 정보, 신청서 서식은 서류 정보로 분리한다.
+PROCEDURE_DIR = "인허가 절차 정보"
+DOCUMENT_DIR = "서류 정보"
+
 
 class PermitType(StrEnum):
     """지원하는 인허가 유형 코드."""
@@ -30,11 +34,25 @@ class PermitDoc:
     name: str
     filename: str
     keywords: tuple[str, ...]
+    form_filename: str | None = None
+    category: str = PROCEDURE_DIR
+
+    @property
+    def rel_path(self) -> str:
+        """절차 문서의 DOCS_DIR 기준 상대 경로. 예: 인허가 절차 정보/03_농지전용_….md"""
+        return f"{self.category}/{self.filename}"
 
     @property
     def doc_path(self) -> str:
-        """에이전트가 read_file 에 쓰는 가상 경로. 예: /docs/03_농지전용_….md"""
-        return f"{DOCS_MOUNT}/{self.filename}"
+        """에이전트가 read_file 에 쓰는 가상 경로. 예: /docs/인허가 절차 정보/03_농지전용_….md"""
+        return f"{DOCS_MOUNT}/{self.rel_path}"
+
+    @property
+    def form_rel_path(self) -> str | None:
+        """신청서 서식 문서의 DOCS_DIR 기준 상대 경로. 미등록이면 None."""
+        if self.form_filename is None:
+            return None
+        return f"{DOCUMENT_DIR}/{self.form_filename}"
 
 
 # 6개 인허가 유형 ↔ docs/ 파일 매핑. 새 유형은 docs/ 에 .md 추가 후 여기 1줄 등록한다.
@@ -43,36 +61,42 @@ PERMITS: tuple[PermitDoc, ...] = (
         code=PermitType.BUILDING,
         name="건축ㆍ대수선ㆍ용도변경 허가",
         filename="건축ㆍ대수선ㆍ용도변경 허가 신청서.md",
+        form_filename="건축ㆍ대수선ㆍ용도변경 (변경)허가 신청서.md",
         keywords=("건축", "신축", "증축", "대수선", "용도변경", "건물"),
     ),
     PermitDoc(
         code=PermitType.MOUNTAIN,
         name="산지전용 허가",
         filename="02_산지전용_허가_체크리스트_프로세스.md",
+        form_filename="산지전용 허가 신청서.md",
         keywords=("산지", "산지전용", "임야", "산림"),
     ),
     PermitDoc(
         code=PermitType.FARMLAND,
         name="농지전용 허가",
         filename="03_농지전용_허가_체크리스트_프로세스.md",
+        form_filename="농지전용(허가·변경허가) 신청서.md",
         keywords=("농지", "농지전용", "전답", "경작"),
     ),
     PermitDoc(
         code=PermitType.ROAD,
         name="도로점용 허가",
         filename="04_도로점용허가_체크리스트_프로세스.md",
+        form_filename="도로 점용 허가 신청서.md",
         keywords=("도로", "도로점용", "점용", "굴착"),
     ),
     PermitDoc(
         code=PermitType.RIVER,
         name="하천점용 허가",
         filename="05_하천점용허가_체크리스트_프로세스.md",
+        form_filename="하천 점용 허가 신청서.md",
         keywords=("하천", "하천점용", "홍수관리구역"),
     ),
     PermitDoc(
         code=PermitType.DEV_ACT,
         name="개발행위 허가",
         filename="06_개발행위허가_체크리스트_프로세스.md",
+        form_filename="개발행위 허가신청서.md",
         keywords=("개발행위", "형질변경", "토석채취", "공작물"),
     ),
 )

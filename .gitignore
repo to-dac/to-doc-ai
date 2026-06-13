@@ -9,6 +9,8 @@ __pycache__/
 # Distribution / packaging
 .Python
 docs/
+# app/agents/docs 는 앱 런타임 데이터(인허가 문서)라 docs/ 무시에서 제외한다
+!app/agents/docs/
 build/
 develop-eggs/
 dist/

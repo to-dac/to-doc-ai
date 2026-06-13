@@ -6,6 +6,7 @@ import pytest
 from app.agents import permit_document
 from app.agents.permit_document import (
     _AnswerItem,
+    _build_extraction_prompt,
     _coerce_answer,
     _conversation_transcript,
     _ExtractionResult,
@@ -54,6 +55,25 @@ def test_coerce_answer_none_value_is_unknown():
     assert source == "unknown"
 
 
+def test_coerce_answer_keeps_generated_source():
+    """generate_missing 모드의 임의 생성 값은 source='generated' 로 유지된다."""
+    answer, source = _coerce_answer(Question(id=1, questionType="TEXT"), "임의값", "generated")
+    assert answer == "임의값"
+    assert source == "generated"
+
+
+def test_extraction_prompt_strict_vs_generate():
+    """generate_missing 플래그가 프롬프트 규칙을 전환한다."""
+    qs = [Question(id=1, name="성명")]
+    strict = _build_extraction_prompt({}, "", qs)
+    generate = _build_extraction_prompt({}, "", qs, generate_missing=True)
+
+    assert "추측 금지" in strict
+    assert "generated" not in strict
+    assert "임의로 생성" in generate
+    assert 'source="generated"' in generate
+
+
 def test_conversation_transcript_keeps_human_and_ai():
     messages = [
         SimpleNamespace(type="human", content="대수선 하려고요"),
@@ -87,7 +107,7 @@ async def test_fill_permit_document_maps_answers(monkeypatch):
         template=template,
     )
 
-    async def fake_extract(land_info, transcript, questions):
+    async def fake_extract(land_info, transcript, questions, **_):
         assert land_info["pnu"] == "1"
         return _ExtractionResult(
             answers=[
@@ -110,6 +130,30 @@ async def test_fill_permit_document_maps_answers(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fill_permit_document_loads_template_by_permit_type(monkeypatch):
+    """template 없이 permit_type 만 주면 서류 정보 문서에서 양식을 로드해 채운다."""
+    captured: dict = {}
+
+    async def fake_extract(land_info, transcript, questions, **_):
+        captured["question_count"] = len(questions)
+        return _ExtractionResult(answers=[])
+
+    monkeypatch.setattr(permit_document, "_extract_answers", fake_extract)
+
+    body = PermitDocumentRequest(land_info={"pnu": "1"}, permit_type="mountain")
+    result = await fill_permit_document(None, body)
+
+    assert result.templateCode == "mountain_permit"
+    assert result.total_count == captured["question_count"] > 0
+
+
+def test_request_requires_template_or_permit_type():
+    """template·permit_type 둘 다 없으면 검증 단계에서 거부된다."""
+    with pytest.raises(ValueError):
+        PermitDocumentRequest(land_info={"pnu": "1"})
+
+
+@pytest.mark.asyncio
 async def test_fill_permit_document_pulls_conversation(monkeypatch):
     """thread_id 가 있으면 agent.aget_state 로 대화 이력을 읽어 추출에 넘긴다."""
     captured: dict = {}
@@ -121,7 +165,7 @@ async def test_fill_permit_document_pulls_conversation(monkeypatch):
                 values={"messages": [SimpleNamespace(type="human", content="대수선 할게요")]}
             )
 
-    async def fake_extract(land_info, transcript, questions):
+    async def fake_extract(land_info, transcript, questions, **_):
         captured["transcript"] = transcript
         return _ExtractionResult(answers=[])
 
