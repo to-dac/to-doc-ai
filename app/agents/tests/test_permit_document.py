@@ -10,7 +10,6 @@ from app.agents.permit_document import (
     _coerce_answer,
     _conversation_transcript,
     _ExtractionResult,
-    _looks_like_form_data,
     _save_snapshot,
     detect_document_changes,
     fill_permit_document,
@@ -183,13 +182,6 @@ def test_request_requires_template_or_permit_type():
         PermitDocumentRequest(land_info={"pnu": "1"})
 
 
-def test_looks_like_form_data_filter():
-    t = _change_template()
-    assert _looks_like_form_data("면적은 500이야", t) is True  # 숫자
-    assert _looks_like_form_data("성명 바꿔줘", t) is True  # 힌트 키워드
-    assert _looks_like_form_data("그냥 고마워요", t) is False  # 신호 없음
-
-
 @pytest.mark.asyncio
 async def test_detect_no_baseline_returns_empty():
     """문서를 생성한 적 없으면(스냅샷 없음) 감지하지 않는다."""
@@ -197,20 +189,20 @@ async def test_detect_no_baseline_returns_empty():
 
 
 @pytest.mark.asyncio
-async def test_detect_skips_llm_when_filter_blocks(monkeypatch):
-    """1차 필터에서 막힌 발화는 LLM 재추출 없이 빈 변경분을 낸다."""
-    _save_snapshot("th-filter", _change_template(), {}, {1: None, 2: None})
+async def test_detect_runs_extraction_every_turn(monkeypatch):
+    """베이스라인이 있으면 폼 신호 없는 발화여도 매 턴 재추출한다(A안)."""
+    _save_snapshot("th-everyturn", _change_template(), {}, {1: "홍길동", 2: None})
     called = {"n": 0}
 
-    async def fake_extract(*args, **kwargs):
+    async def fake_extract(land_info, transcript, questions):
         called["n"] += 1
         return _ExtractionResult(answers=[])
 
     monkeypatch.setattr(permit_document, "_extract_answers", fake_extract)
-    changes = await detect_document_changes(_MsgAgent([_human("고마워요")]), "th-filter")
+    changes = await detect_document_changes(_MsgAgent([_human("고마워요")]), "th-everyturn")
 
-    assert changes == []
-    assert called["n"] == 0  # 필터 차단 → LLM 미호출
+    assert called["n"] == 1  # 매 턴 LLM 호출
+    assert changes == []  # 추출 결과 없음 → 변경 없음
 
 
 @pytest.mark.asyncio

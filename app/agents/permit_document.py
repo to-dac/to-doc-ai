@@ -76,16 +76,6 @@ async def _collect_conversation(agent, thread_id: str | None) -> str:
     return _conversation_transcript(await _load_messages(agent, thread_id))
 
 
-def _latest_user_message(messages: list) -> str:
-    """메시지 목록에서 가장 최근 사용자(human) 발화 텍스트를 반환한다."""
-    for msg in reversed(messages or []):
-        if getattr(msg, "type", None) == "human":
-            content = getattr(msg, "content", None)
-            if isinstance(content, str) and content:
-                return content
-    return ""
-
-
 def _resolve_template(body: PermitDocumentRequest) -> DocumentTemplate:
     """요청에서 채울 양식을 확정한다. template 직접 지정이 우선, 없으면 permit_type 로 로드."""
     if body.template is not None:
@@ -254,12 +244,6 @@ class _DocumentSnapshot:
 # thread_id → 마지막 생성 문서 스냅샷. InMemorySaver 와 동일하게 인메모리·단일 프로세스 전제.
 _SNAPSHOTS: dict[str, _DocumentSnapshot] = {}
 
-# 1차 필터: 사용자 발화가 서류 값 같은 신호를 담았는지 싸게 판별할 키워드.
-_FORM_HINT_KEYWORDS = (
-    "이름", "성명", "주소", "전화", "번호", "면적", "목적", "기간", "날짜", "일자",
-    "구분", "종류", "방법", "위치", "지번", "소재지", "상호", "사업자", "대표", "법인",
-)
-
 
 def _save_snapshot(
     thread_id: str, template: DocumentTemplate, land_info: dict, answers: dict[int, str | None]
@@ -270,42 +254,18 @@ def _save_snapshot(
     )
 
 
-def _looks_like_form_data(message: str, template: DocumentTemplate) -> bool:
-    """발화가 서류 값을 담았을 가능성을 싸게(LLM 없이) 판별한다.
-
-    숫자가 있거나, 힌트 키워드 또는 양식 질문명 토큰과 겹치면 통과시킨다.
-    """
-    if not message:
-        return False
-    if any(ch.isdigit() for ch in message):
-        return True
-    if any(kw in message for kw in _FORM_HINT_KEYWORDS):
-        return True
-    for q in _iter_questions(template):
-        if not q.name:
-            continue
-        for token in q.name.replace("(", " ").replace(")", " ").split():
-            if len(token) >= 2 and token in message:
-                return True
-    return False
-
-
 async def detect_document_changes(agent, thread_id: str | None) -> list[DocumentChange]:
     """문서 생성 이후 채팅으로 바뀐 서류 값을 감지해 변경분 목록을 반환한다.
 
     - 베이스라인(생성 스냅샷)이 없으면 빈 목록(감지 비활성).
-    - 1차 필터를 통과한 발화에 한해 재추출(LLM)해 스냅샷과 diff 한다.
+    - 베이스라인이 있으면 매 턴 대화를 재추출(LLM)해 스냅샷과 diff 한다.
     - 감지된 값은 스냅샷에 반영해 다음 턴은 직전 대비 변경분만 내보낸다.
     """
     snap = _SNAPSHOTS.get(thread_id) if thread_id else None
     if snap is None:
         return []
 
-    messages = await _load_messages(agent, thread_id)
-    if not _looks_like_form_data(_latest_user_message(messages), snap.template):
-        return []
-
-    transcript = _conversation_transcript(messages)
+    transcript = await _collect_conversation(agent, thread_id)
     questions = _iter_questions(snap.template)
     extraction = await _extract_answers(snap.land_info, transcript, questions)
     by_id = {a.question_id: a for a in extraction.answers}
