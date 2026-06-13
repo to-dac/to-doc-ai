@@ -1,6 +1,7 @@
 # 인허가 멀티턴 에이전트 단위 테스트 — 네트워크 호출 없이 배선·문서접근만 검증한다
 from types import SimpleNamespace
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -10,6 +11,7 @@ from app.agents.permits import (
     DOCS_MOUNT,
     PERMITS,
     build_docs_index,
+    format_land_context,
     get_permit,
 )
 from app.agents.state import ConversationState
@@ -70,6 +72,75 @@ def test_backend_exposes_six_docs() -> None:
     entries = backend.ls(f"{DOCS_MOUNT}/").entries
     md_files = [e for e in entries if not e["is_dir"] and e["path"].endswith(".md")]
     assert len(md_files) == 6
+
+
+def test_format_land_context_renders_key_fields() -> None:
+    """필지 정보가 용도지역·건물현황·규제 목록으로 렌더된다."""
+    ctx = {
+        "pnu": "1168010100107370000",
+        "address": "서울 강남구 역삼동 737",
+        "prposArea1Nm": "일반상업지역",
+        "lndpclAr": "13156.7",
+        "building": {"hasBuilding": True, "bldNm": "강남파이낸스센터", "bcRat": 42.5677},
+        "landUses": [{"code": "UQA220", "name": "일반상업지역", "conflictType": "포함"}],
+    }
+    text = format_land_context(ctx)
+    assert "## 대상 필지 정보" in text
+    assert "1168010100107370000" in text
+    assert "일반상업지역" in text
+    assert "강남파이낸스센터" in text
+    assert "42.5677" in text
+    assert "UQA220" in text
+    assert "포함" in text
+
+
+def test_format_land_context_marks_vacant_land() -> None:
+    """건물이 없으면 나대지로 표기하고 빈 값은 생략한다."""
+    text = format_land_context({"pnu": "123", "building": {"hasBuilding": False}})
+    assert "나대지" in text
+    assert "주소" not in text  # 빈 값은 줄을 만들지 않는다
+
+
+@pytest.mark.asyncio
+async def test_run_permit_chat_seeds_and_injects_land_context() -> None:
+    """첫 턴 land_context 는 state 에 시드되고 발화 앞에 주입된다."""
+    captured: dict = {}
+
+    class FakeAgent:
+        async def ainvoke(self, input_state, config):
+            captured["input_state"] = input_state
+            captured["config"] = config
+            return {"messages": [SimpleNamespace(content="ok")], "permit_type": None}
+
+    reply, permit_type = await permit_agent.run_permit_chat(
+        FakeAgent(),
+        "이 땅에 증축 가능해?",
+        "t-1",
+        {"pnu": "123", "prposArea1Nm": "일반상업지역"},
+    )
+
+    assert reply == "ok"
+    assert captured["input_state"]["land_context"] == {"pnu": "123", "prposArea1Nm": "일반상업지역"}
+    content = captured["input_state"]["messages"][0]["content"]
+    assert "## 대상 필지 정보" in content
+    assert "이 땅에 증축 가능해?" in content
+    assert captured["config"]["configurable"]["thread_id"] == "t-1"
+
+
+@pytest.mark.asyncio
+async def test_run_permit_chat_without_land_context_omits_seed() -> None:
+    """land_context 가 없으면 state 에 시드하지 않고 발화만 전달한다."""
+    captured: dict = {}
+
+    class FakeAgent:
+        async def ainvoke(self, input_state, config):
+            captured["input_state"] = input_state
+            return {"messages": [SimpleNamespace(content="ok")]}
+
+    await permit_agent.run_permit_chat(FakeAgent(), "그럼 서류는?", "t-1")
+
+    assert "land_context" not in captured["input_state"]
+    assert captured["input_state"]["messages"][0]["content"] == "그럼 서류는?"
 
 
 def test_build_permit_agent_wires_multiturn(monkeypatch) -> None:

@@ -13,3 +13,6 @@ class ConversationState(DeepAgentState):
 
     # 확정된 인허가 유형 코드. 미확정이면 키가 없거나 None.
     permit_type: str | None
+
+    # 대상 필지 정보(첫 턴에 전달받아 보존). 미전달이면 키가 없거나 None.
+    land_context: dict | None

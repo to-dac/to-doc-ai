@@ -86,6 +86,64 @@ def get_permit(code: str) -> PermitDoc | None:
     return PERMITS_BY_CODE.get(code)
 
 
+def format_land_context(ctx: dict) -> str:
+    """대상 필지 정보(dict)를 시스템/대화 주입용 한국어 마크다운 블록으로 렌더한다.
+
+    값이 없는 항목은 생략한다. landUses 는 규제 목록으로, building 은 개발현황으로 펼친다.
+    """
+
+    def line(label: str, value: object, unit: str = "") -> str | None:
+        if value is None or value == "":
+            return None
+        return f"- {label}: {value}{unit}"
+
+    parts: list[str] = ["## 대상 필지 정보"]
+
+    basic = [
+        line("PNU", ctx.get("pnu")),
+        line("주소", ctx.get("address")),
+        line("지목", ctx.get("lndcgrCodeNm")),
+        line("대지면적", ctx.get("lndpclAr"), " ㎡"),
+        line("용도지역", ctx.get("prposArea1Nm")),
+        line("용도지역2", ctx.get("prposArea2Nm")),
+        line("토지이용상황", ctx.get("ladUseSittnNm")),
+        line("도로접면", ctx.get("roadSideCodeNm")),
+        line("개별공시지가", ctx.get("pblntfPclnd"), " 원/㎡"),
+    ]
+    parts.extend(p for p in basic if p)
+
+    building = ctx.get("building") or {}
+    if building.get("hasBuilding"):
+        parts.append("### 건물 현황")
+        bld = [
+            line("건물명", building.get("bldNm")),
+            line("주용도", building.get("mainPurpsCdNm")),
+            line("연면적", building.get("totArea"), " ㎡"),
+            line("건폐율", building.get("bcRat"), " %"),
+            line("용적률", building.get("vlRat"), " %"),
+            line("높이", building.get("heit"), " m"),
+            line("지상층수", building.get("grndFlrCnt"), " 층"),
+            line("지하층수", building.get("ugrndFlrCnt"), " 층"),
+            line("구조", building.get("strctCdNm")),
+        ]
+        parts.extend(p for p in bld if p)
+    elif building:
+        parts.append("### 건물 현황\n- 건물 없음(나대지)")
+
+    land_uses = ctx.get("landUses") or []
+    if land_uses:
+        parts.append("### 토지이용 규제")
+        for item in land_uses:
+            name = item.get("name") or item.get("code") or ""
+            code = item.get("code")
+            conflict = item.get("conflictType")
+            suffix = f" ({conflict})" if conflict else ""
+            code_part = f" [{code}]" if code and code != name else ""
+            parts.append(f"- {name}{code_part}{suffix}")
+
+    return "\n".join(parts)
+
+
 def build_docs_index() -> str:
     """시스템 프롬프트에 주입할 인허가 문서 인덱스 텍스트를 만든다.
 

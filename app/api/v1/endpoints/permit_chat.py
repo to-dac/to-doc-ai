@@ -21,5 +21,6 @@ async def permit_chat(body: PermitChatRequest, request: Request) -> PermitChatRe
         raise HTTPException(status_code=503, detail="인허가 에이전트가 초기화되지 않았습니다.")
 
     thread_id = body.thread_id or str(uuid.uuid4())
-    reply, permit_type = await run_permit_chat(agent, body.message, thread_id)
+    land_context = body.land_context.model_dump() if body.land_context else None
+    reply, permit_type = await run_permit_chat(agent, body.message, thread_id, land_context)
     return PermitChatResponse(thread_id=thread_id, reply=reply, permit_type=permit_type)

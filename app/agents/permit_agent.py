@@ -11,7 +11,7 @@ from deepagents.backends.state import StateBackend
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agents.llm import build_model
-from app.agents.permits import DOCS_DIR, DOCS_MOUNT, build_docs_index
+from app.agents.permits import DOCS_DIR, DOCS_MOUNT, build_docs_index, format_land_context
 from app.agents.state import ConversationState
 from app.agents.tools import set_permit_type
 
@@ -43,7 +43,25 @@ def _system_prompt() -> str:
    - 문서에 없는 내용은 추측하지 말고 "문서에 명시되어 있지 않다"고 답하라.
 4) 이전 턴에서 이미 유형이 확정된 상태(permit_type)면 다시 묻지 말고
    같은 문서로 이어서 답하라. 사용자가 다른 유형으로 바꾸면 그때 갱신하라.
-5) 인덱스에 없는 유형을 물으면, 지원 목록을 안내하고 가장 가까운 유형을 제안하라."""
+5) 인덱스에 없는 유형을 물으면, 지원 목록을 안내하고 가장 가까운 유형을 제안하라.
+
+[대상 필지 정보 활용]
+- 대화에 '## 대상 필지 정보' 블록이 있으면, 그 필지의 용도지역·지목·면적·건폐율/용적률·
+  토지이용 규제(landUses) 등을 인허가 가능 여부·규모 판단의 근거로 적극 활용하라.
+- 필지 데이터에 없는 값은 추측하지 말고 "필지 정보에 없다"고 답하라.
+- 필지 정보는 첫 턴에만 제공되며 이후 턴에도 동일하게 유효하니 매번 다시 묻지 마라.
+
+[출력 형식 — 반드시 준수]
+- 답변에 마크다운 문법(제목 #, 목록 - / 1., 표 |, 굵게 ** 등)을 사용하는 부분은
+  반드시 ```markdown 펜스로 감싸서 출력하라. 예:
+  ```markdown
+  ## 필요 서류
+  - [ ] 토지이용계획확인서
+  - [ ] 사업계획서
+  ```
+- 마크다운 문법이 들어가는 모든 블록(목록·표·제목 포함)을 ``` ``` 코드펜스 안에 넣어,
+  렌더링되지 않은 원본 마크다운 형태로 전달되게 하라.
+- 코드펜스 밖의 일반 설명 문장은 마크다운 문법 없이 평문으로 작성하라."""
 
 
 def build_permit_agent():
@@ -70,13 +88,29 @@ def build_permit_agent():
     )
 
 
-async def run_permit_chat(agent, prompt: str, thread_id: str) -> tuple[str, str | None]:
+async def run_permit_chat(
+    agent,
+    prompt: str,
+    thread_id: str,
+    land_context: dict | None = None,
+) -> tuple[str, str | None]:
     """단일 발화를 실행하고 (응답 텍스트, 확정 인허가 유형)을 반환한다.
 
-    동일 thread_id 로 호출하면 이전 턴 상태(대화 이력·permit_type)가 이어진다.
+    동일 thread_id 로 호출하면 이전 턴 상태(대화 이력·permit_type·land_context)가 이어진다.
+
+    land_context 가 주어지면(첫 턴) 상태에 보존하고, 포맷한 필지 정보를 발화 앞에
+    붙여 모델이 즉시 인지하도록 한다. 이후 턴에는 생략해도 대화 이력으로 유지된다.
     """
+    content = prompt
+    input_state: dict = {}
+    if land_context:
+        content = f"{format_land_context(land_context)}\n\n## 질문\n{prompt}"
+        input_state["land_context"] = land_context
+
+    input_state["messages"] = [{"role": "user", "content": content}]
+
     result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": prompt}]},
+        input_state,
         config={"configurable": {"thread_id": thread_id}},
     )
     return result["messages"][-1].content, result.get("permit_type")

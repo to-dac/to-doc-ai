@@ -11,10 +11,10 @@ client = TestClient(app)
 @pytest.fixture
 def fake_agent(monkeypatch):
     """app.state 에 sentinel 에이전트를 주입하고, run_permit_chat 호출을 기록한다."""
-    calls: list[tuple[object, str, str]] = []
+    calls: list[tuple[object, str, str, dict | None]] = []
 
-    async def fake_run(agent, message, thread_id):
-        calls.append((agent, message, thread_id))
+    async def fake_run(agent, message, thread_id, land_context=None):
+        calls.append((agent, message, thread_id, land_context))
         return f"reply to: {message}", "farmland"
 
     sentinel = object()
@@ -59,3 +59,33 @@ def test_chat_rejects_empty_message(fake_agent):
     """빈 메시지는 422 검증 오류."""
     res = client.post("/api/v1/permit/chat", json={"message": ""})
     assert res.status_code == 422
+
+
+def test_chat_passes_land_context_on_first_turn(fake_agent):
+    """첫 턴의 land_context 가 dict 로 변환되어 run_permit_chat 에 전달된다."""
+    _, calls = fake_agent
+    res = client.post(
+        "/api/v1/permit/chat",
+        json={
+            "message": "이 땅에 증축 가능해?",
+            "land_context": {
+                "pnu": "1168010100107370000",
+                "prposArea1Nm": "일반상업지역",
+                "building": {"hasBuilding": True, "bcRat": 42.5677},
+                "landUses": [{"code": "UQA220", "name": "일반상업지역", "conflictType": "포함"}],
+            },
+        },
+    )
+    assert res.status_code == 200
+    land_context = calls[0][3]
+    assert land_context is not None
+    assert land_context["pnu"] == "1168010100107370000"
+    assert land_context["building"]["bcRat"] == 42.5677
+    assert land_context["landUses"][0]["code"] == "UQA220"
+
+
+def test_chat_land_context_omitted_passes_none(fake_agent):
+    """land_context 를 생략하면 None 으로 전달된다(이후 턴)."""
+    _, calls = fake_agent
+    client.post("/api/v1/permit/chat", json={"message": "그럼 서류는?", "thread_id": "t-1"})
+    assert calls[0][3] is None
