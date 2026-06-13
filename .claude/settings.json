@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest:*)",
+      "Bash(ruff:*)",
+      "Bash(mypy:*)",
+      "Bash(uvicorn:*)",
+      "Bash(alembic:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python -m mypy:*)",
+      "Bash(python --version:*)",
+      "Bash(pip:*)",
+      "Bash(uv:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git status:*)",
+      "Bash(git diff --name-only:*)",
+      "Bash(grep -rn:*)",
+      "Bash(find . -name:*)",
+      "Bash(ls:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$FILE_PATH\" | grep -q '\\.py$'; then echo '[Hook] Python 파일 변경 감지 — 린트 중...'; ruff check \"$FILE_PATH\" --quiet 2>&1 | tail -5 && echo '[Hook] 린트 OK' || echo '[Hook] 린트 실패 — /dev fix 실행을 권장합니다'; fi"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f requirements.txt ]; then echo '[Hook] 최종 검증 중...'; ruff check . --quiet 2>&1 | tail -5 && echo '[Hook] 린트 OK' || echo '[Hook] 린트 실패 — 확인하세요'; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
